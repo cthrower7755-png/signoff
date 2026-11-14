@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { currentUser } from "@/lib/supabase/server";
 import { checkCriterion, parseCriteriaLines } from "@/lib/rules";
+import { draftCriteria, type DraftedCriterion } from "@/lib/ai";
 
 const NewOrder = z.object({
   title: z.string().trim().min(3).max(140),
@@ -35,6 +36,17 @@ export async function createOrder(_: FormState, formData: FormData): Promise<For
     .insert(rows.map((r, i) => ({ order_id: order.id, position: i + 1, criterion: r.criterion, how_checked: r.how_checked })));
   if (cErr) return { error: cErr.message };
   redirect(`/orders/${order.id}`);
+}
+
+export async function draftWithAI(scope: string): Promise<{ items?: DraftedCriterion[]; error?: string }> {
+  const { user } = await currentUser();
+  if (!user) return { error: "Sign in first." };
+  if (scope.trim().length < 20) return { error: "Describe the order in a sentence or two first." };
+  try {
+    return { items: await draftCriteria(scope) };
+  } catch (e) {
+    return { error: (e as Error).message };
+  }
 }
 
 async function rpc(fn: string, args: Record<string, unknown>, path: string) {
