@@ -26,7 +26,13 @@ export async function draftCriteria(scope: string): Promise<DraftedCriterion[]> 
   const body = await res.json();
   const text: string = body?.content?.find((b: { type: string }) => b.type === "text")?.text ?? "";
   const json = text.slice(text.indexOf("["), text.lastIndexOf("]") + 1);
-  const parsed = Draft.safeParse(JSON.parse(json || "[]"));
+  let raw: unknown = [];
+  try {
+    raw = JSON.parse(json || "[]");
+  } catch {
+    throw new Error("AI reply was not in the expected format.");
+  }
+  const parsed = Draft.safeParse(raw);
   if (!parsed.success) throw new Error("AI reply was not in the expected format.");
   return parsed.data.map((d) => ({ ...d, issues: checkCriterion(d.criterion, d.how_checked) }));
 }

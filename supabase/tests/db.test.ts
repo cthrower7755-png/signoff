@@ -1,7 +1,7 @@
 // Database tests: run the real migration in an in-memory Postgres (PGlite) with Supabase's auth
 // functions stubbed, then act as the owner, the client and a stranger. No network, no Supabase account.
 import { PGlite } from "@electric-sql/pglite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 
@@ -53,7 +53,8 @@ beforeAll(async () => {
   db = new PGlite();
   await db.exec(AUTH_STUB);
   for (const [id, email] of Object.entries(users)) await db.query("insert into auth.users values ($1, $2)", [id, email]);
-  await db.exec(readFileSync(join(__dirname, "../migrations/0001_init.sql"), "utf8"));
+  const dir = join(__dirname, "../migrations");
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".sql")).sort()) await db.exec(readFileSync(join(dir, f), "utf8"));
   await db.exec("grant select, insert, update, delete on public.orders, public.criteria to authenticated");
   await db.exec("revoke insert, update, delete on public.order_events from authenticated");
 });
@@ -124,5 +125,83 @@ describe("row-level security and the order lifecycle", () => {
     await as(CLIENT, "select sign_off($1)", [orderId]);
     const events = await as<{ kind: string }>(CLIENT, "select kind from order_events where order_id = $1 order by id", [orderId]);
     expect(events.map((e) => e.kind)).toEqual(["sent", "accepted", "delivered", "flagged", "delivered", "signed_off"]);
+  });
+});
+
+// Gaps found in the 2026-11-16 review (docs/plans/07-tighten-rules.md). Each test tries the gap and expects it to fail.
+describe("the bar stays put after the client signs off", () => {
+  let o2 = "";
+  let c2 = "";
+
+  it("new orders must start as a plain draft", async () => {
+    await fails(OWNER, "insert into orders (title, client_email, status) values ('Fake finished job', 'client@example.com', 'signed_off')", [], /start as a draft/);
+    await fails(OWNER, "insert into orders (title, client_email, signed_off_at) values ('Fake finished job', 'client@example.com', now())", [], /start as a draft/);
+  });
+
+  it("nothing is marked met, and no flag is set, in a draft", async () => {
+    const [o] = await as<{ id: string }>(OWNER, "insert into orders (title, client_email) values ('Second order', 'client@example.com') returning id");
+    o2 = o.id;
+    await fails(OWNER, "insert into criteria (order_id, position, criterion, how_checked, met, evidence) values ($1, 1, 'Report delivered as PDF', 'File exists', true, 'x')", [o2], /in progress/);
+    await fails(OWNER, "insert into criteria (order_id, position, criterion, how_checked, client_flag) values ($1, 1, 'Report delivered as PDF', 'File exists', 'fake')", [o2], /only the client/);
+    const [c] = await as<{ id: string }>(OWNER, "insert into criteria (order_id, position, criterion, how_checked) values ($1, 1, 'Report delivered as PDF', 'File exists') returning id", [o2]);
+    c2 = c.id;
+    await fails(OWNER, "update criteria set met = true, evidence = 'early' where id = $1", [c2], /in progress/);
+  });
+
+  it("once sent: no evidence yet, no fake client flag, details and timestamps fixed", async () => {
+    await as(OWNER, "select send_order($1)", [o2]);
+    await fails(OWNER, "update criteria set met = true, evidence = 'before accept' where id = $1", [c2], /in progress/);
+    await fails(OWNER, "update criteria set client_flag = 'fake complaint' where id = $1", [c2], /only the client/);
+    await fails(OWNER, "update orders set title = 'A different job' where id = $1", [o2], /locked/);
+    await fails(OWNER, "update orders set due_date = '2030-01-01' where id = $1", [o2], /locked/);
+    await fails(OWNER, "update orders set accepted_at = now() where id = $1", [o2], /order functions/);
+  });
+
+  it("evidence moves while the work is in progress, then freezes at sign-off", async () => {
+    await as(CLIENT, "select accept_order($1)", [o2]);
+    await as(OWNER, "update criteria set met = true, evidence = 'report.pdf' where id = $1", [c2]);
+    await as(OWNER, "select deliver_order($1)", [o2]);
+    await fails(OWNER, "update criteria set evidence = 'swapped after delivery' where id = $1", [c2], /in progress/);
+    await as(CLIENT, "select flag_criterion($1, 'The PDF is missing the appendix')", [c2]);
+    await fails(OWNER, "update criteria set client_flag = null where id = $1", [c2], /only the client/);
+    await as(OWNER, "update criteria set met = true, evidence = 'report-v2.pdf' where id = $1", [c2]);
+    await as(OWNER, "select deliver_order($1)", [o2]);
+    const [c] = await as<{ client_flag: string | null }>(OWNER, "select client_flag from criteria where id = $1", [c2]);
+    expect(c.client_flag).toBeNull();
+    await as(CLIENT, "select sign_off($1)", [o2]);
+    await fails(OWNER, "update criteria set evidence = 'rewritten after sign-off' where id = $1", [c2], /in progress/);
+    await fails(OWNER, "update criteria set met = false where id = $1", [c2], /in progress/);
+    await fails(OWNER, "update orders set signed_off_at = now() - interval '30 days' where id = $1", [o2], /order functions/);
+    await fails(OWNER, "delete from orders where id = $1", [o2]);
+    const [row] = await as<{ evidence: string }>(CLIENT, "select evidence from criteria where id = $1", [c2]);
+    expect(row.evidence).toBe("report-v2.pdf");
+  });
+});
+
+describe("AI drafting limit (ai_usage)", () => {
+  it("anonymous users cannot draft or read usage", async () => {
+    await fails(null, "select take_ai_draft()");
+    await fails(null, "select * from ai_usage");
+  });
+
+  it("users cannot write their own count", async () => {
+    await fails(OWNER, "insert into ai_usage (user_id, drafts) values ($1, 0)", [OWNER]);
+    await fails(OWNER, "update ai_usage set drafts = 0");
+  });
+
+  it("20 drafts a day, then refused; each user sees only their own count", async () => {
+    const results: boolean[] = [];
+    for (let i = 0; i < 21; i++) {
+      const [r] = await as<{ take_ai_draft: boolean }>(OWNER, "select take_ai_draft()");
+      results.push(r.take_ai_draft);
+    }
+    expect(results.slice(0, 20).every(Boolean)).toBe(true);
+    expect(results[20]).toBe(false);
+    const [mine] = await as<{ drafts: number }>(OWNER, "select drafts from ai_usage");
+    expect(mine.drafts).toBe(21);
+    expect(await as(CLIENT, "select * from ai_usage")).toHaveLength(0);
+    expect(await as(STRANGER, "select * from ai_usage")).toHaveLength(0);
+    const [r] = await as<{ take_ai_draft: boolean }>(CLIENT, "select take_ai_draft()");
+    expect(r.take_ai_draft).toBe(true);
   });
 });
