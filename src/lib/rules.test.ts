@@ -9,6 +9,10 @@ describe("checkCriterion", () => {
     const issues = checkCriterion("The report is professional and high quality", "Client reads it");
     expect(issues.map((i) => i.code)).toContain("vague");
   });
+  it("names every taste word in one message", () => {
+    const vague = checkCriterion("Professional, high-quality report", "reviewed by client").find((i) => i.code === "vague");
+    expect(vague?.message).toBe('"high-quality" and "professional" are matters of taste. Say what a third party could check instead.');
+  });
   it("rejects criteria with nothing verifiable", () => {
     expect(checkCriterion("The design should feel right", "Look at it").map((i) => i.code)).toContain("not_checkable");
   });
