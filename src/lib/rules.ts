@@ -32,7 +32,12 @@ export function checkCriterion(criterion: string, howChecked: string): Issue[] {
   if (c.length > 400) issues.push({ code: "too_long", message: "Keep a criterion under 400 characters; split it." });
   const lower = ` ${c.toLowerCase()} `;
   const hits = VAGUE.filter((w) => new RegExp(`[^a-z]${w.replace(/[-]/g, "\\-")}[^a-z]`).test(lower));
-  if (hits.length) issues.push({ code: "vague", message: `"${hits[0]}" is a matter of taste. Say what a third party could check instead.` });
+  if (hits.length) {
+    const named = hits.map((w) => `"${w}"`);
+    const list = named.length === 1 ? named[0] : `${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
+    const verb = named.length === 1 ? "is a matter" : "are matters";
+    issues.push({ code: "vague", message: `${list} ${verb} of taste. Say what a third party could check instead.` });
+  }
   if (!CHECKABLE.test(c)) issues.push({ code: "not_checkable", message: "Add something countable or verifiable (a number, 'every', a file, a test)." });
   if (h.length < 3) issues.push({ code: "no_check", message: "Say how it will be checked." });
   return issues;
