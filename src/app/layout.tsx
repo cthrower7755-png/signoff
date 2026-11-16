@@ -31,6 +31,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <nav><Suspense fallback={null}><UserNav /></Suspense></nav>
         </header>
         <main><Suspense fallback={<p className="dim">Loading…</p>}>{children}</Suspense></main>
+        <footer className="dim demo-note">
+          Demo build: two-factor sign-in is switched off so anyone can try it. In production, accepting, delivering and signing
+          off would require an authenticator code, enforced by the database.
+        </footer>
       </body>
     </html>
   );
