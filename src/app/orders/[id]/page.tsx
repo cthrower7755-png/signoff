@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { currentUser } from "@/lib/supabase/server";
 import { STATUS_LABEL, canDeliver, type Status } from "@/lib/rules";
+import { errorText } from "@/lib/errors";
 import { acceptOrder, deliverOrder, flagCriterion, markMet, sendOrder, signOff } from "../actions";
 
 export default async function OrderPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ error?: string }> }) {
@@ -22,7 +23,7 @@ export default async function OrderPage({ params, searchParams }: { params: Prom
         <span className={`pill ${status === "signed_off" ? "ok" : status === "changes_requested" ? "warn" : ""}`}>{STATUS_LABEL[status]}</span>
         <span className="dim">Client: {order.client_email}{order.due_date ? ` · Due ${order.due_date}` : ""}</span>
       </p>
-      {error && <p className="error">{error}</p>}
+      {errorText(error) && <p className="error">{errorText(error)}</p>}
       {status !== "draft" && <p className="dim">The criteria below were locked when the order was sent. They can’t be edited, added to or removed.</p>}
 
       <table>
